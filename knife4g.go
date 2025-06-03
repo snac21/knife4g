@@ -3,13 +3,13 @@ package knife4g
 import (
 	"embed"
 	"encoding/json"
-	"gopkg.in/yaml.v3"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
-	"text/template"
 )
 
 var (
@@ -18,54 +18,36 @@ var (
 )
 
 type Config struct {
-	RelativePath   string // 访问前缀，如 "/doc"
-	OpenApiContent []byte // openapi.yaml的数据内容
-	StaticPath     string // 静态资源路径（可选，默认 embed 的 front）
-	KService       Knife4gService
+	RelativePath  string // 访问前缀，如 "/doc"
+	ServerName    string // 服务名称
+	OpenAPI       *OpenAPI3
+	SwagResources []*SwaggerResource
 }
 
-type Knife4gService struct {
-	Name           string `json:"name"`
-	Url            string `json:"url"`
-	SwaggerVersion string `json:"swaggerVersion"`
-	Location       string `json:"location"`
+// Knife4jServer Knife4j服务器结构
+type Knife4jServer struct {
+	config   *Config
+	staticFS fs.FS
 }
 
-// OpenAPI文档结构
-type OpenAPI struct {
-	OpenAPI    string                 `yaml:"openapi" json:"swagger"`
-	Info       map[string]interface{} `yaml:"info" json:"info"`
-	Paths      map[string]interface{} `yaml:"paths" json:"paths"`
-	Components map[string]interface{} `yaml:"components" json:"definitions"`
-	Tags       []struct {
-		Name        string `yaml:"name" json:"name"`
-		Description string `yaml:"description" json:"description"`
-	} `yaml:"tags" json:"tags"`
+// SwaggerResource 表示 Swagger 资源信息
+type SwaggerResource struct {
+	ConfigURL         string `json:"configUrl"`
+	OAuth2RedirectURL string `json:"oauth2RedirectUrl"`
+	URL               string `json:"url"`
+	ValidatorURL      string `json:"validatorUrl"`
+	Name              string `json:"name"`
+	Location          string `json:"location"`
+	SwaggerVersion    string `json:"swaggerVersion"`
+	TagSort           string `json:"tagSort"`
+	OperationSort     string `json:"operationSort"`
 }
 
 // Handler 返回 knife4g 文档服务 http.Handler
 func Handler(config *Config) http.Handler {
-	docYamlPath := config.RelativePath + "/docYaml"
-	servicesPath := config.RelativePath + "/front/service"
-	docPath := config.RelativePath + "/index"
-	appjsPath := config.RelativePath + "/front/webjars/js/app.42aa019b.js"
-
-	config.KService.Url = "/docYaml"
-	config.KService.Location = "/docYaml"
-	config.KService.Name = "API Documentation"
-	config.KService.SwaggerVersion = "2.0"
-
-	appjsTemplate, err := template.New("app.42aa019b.js").
-		Delims("{[(", ")]}").
-		ParseFS(front, "front/webjars/js/app.42aa019b.js")
+	server, err := NewKnife4jServer(config)
 	if err != nil {
-		log.Println(err)
-	}
-	docTemplate, err := template.New("doc.html").
-		Delims("{[(", ")]}").
-		ParseFS(front, "front/doc.html")
-	if err != nil {
-		log.Println(err)
+		log.Fatalf("Failed to create Knife4j server: %v", err)
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,226 +56,406 @@ func Handler(config *Config) http.Handler {
 			return
 		}
 
-		log.Printf("Received request: %s", r.URL.Path)
-
-		// 特殊处理 service 请求
-		if strings.HasSuffix(r.URL.Path, "/front/service") {
-			log.Printf("Handling service request: %s", r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]Knife4gService{config.KService})
-			return
+		path := r.URL.Path
+		if config.RelativePath != "" && strings.HasPrefix(path, config.RelativePath) {
+			path = strings.TrimPrefix(path, config.RelativePath)
 		}
 
-		switch r.URL.Path {
-		case appjsPath:
-			log.Printf("Handling appjsPath: %s", r.URL.Path)
-			err := appjsTemplate.Execute(w, config)
-			if err != nil {
-				log.Printf("Failed to execute appjs template: %v", err)
-			}
-		case servicesPath:
-			log.Printf("Handling servicesPath: %s", r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]Knife4gService{config.KService})
-		case docPath:
-			log.Printf("Rendering doc template with RelativePath: %s", config.RelativePath)
-			err := docTemplate.Execute(w, config)
-			if err != nil {
-				log.Printf("Failed to execute doc template: %v", err)
-			}
-		case docYamlPath:
-			log.Printf("Handling docYamlPath: %s", r.URL.Path)
-			// 解析OpenAPI文档
-			var openapi OpenAPI
-			if err := yaml.Unmarshal(config.OpenApiContent, &openapi); err != nil {
-				log.Printf("Failed to parse OpenAPI document: %v\nContent: %s", err, string(config.OpenApiContent))
-				http.Error(w, "Failed to parse OpenAPI document", http.StatusInternalServerError)
-				return
-			}
+		// 设置 CORS 头
+		server.setCORSHeaders(w)
 
-			// 转换为Swagger格式
-			swagger := convertToSwagger(&openapi)
+		// 记录请求信息
+		log.Printf("处理请求: %s", path)
 
-			// 返回JSON格式的Swagger文档
+		switch path {
+		case "/v3/api-docs":
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(swagger); err != nil {
-				log.Printf("Failed to encode Swagger document: %v", err)
-				http.Error(w, "Failed to encode Swagger document", http.StatusInternalServerError)
-				return
-			}
+			server.handleOpenAPIDocs(w, r)
+		case "/v3/api-docs/swagger-config":
+			w.Header().Set("Content-Type", "application/json")
+			server.handleSwaggerConfig(w, r)
+		case "/doc.html", "/":
+			// 处理 doc.html 和根路径，设置 HTML 内容类型
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			server.handleStaticFile(w, r)
 		default:
-			// 尝试作为静态文件处理
-			if strings.HasPrefix(r.URL.Path, "/doc/front/") {
-				path := strings.TrimPrefix(r.URL.Path, "/doc")
-				log.Printf("Trying to open file as static: %s", path)
-
-				// 直接使用path，因为path已经包含了/front前缀
-				file, err := front.Open(strings.TrimPrefix(path, "/"))
-				if err != nil {
-					log.Printf("Failed to open static file: %v, path: %s", err, strings.TrimPrefix(path, "/"))
-					http.NotFound(w, r)
-					return
-				}
-				defer file.Close()
-
-				// 设置正确的Content-Type
-				ext := filepath.Ext(path)
-				switch ext {
-				case ".js":
-					w.Header().Set("Content-Type", "application/javascript")
-				case ".css":
-					w.Header().Set("Content-Type", "text/css")
-				case ".html":
-					w.Header().Set("Content-Type", "text/html")
-				case ".ico":
-					w.Header().Set("Content-Type", "image/x-icon")
-				case ".woff", ".woff2":
-					w.Header().Set("Content-Type", "font/woff2")
-				case ".ttf":
-					w.Header().Set("Content-Type", "font/ttf")
-				case ".eot":
-					w.Header().Set("Content-Type", "application/vnd.ms-fontobject")
-				case ".svg":
-					w.Header().Set("Content-Type", "image/svg+xml")
-				case ".png":
-					w.Header().Set("Content-Type", "image/png")
-				case ".jpg", ".jpeg":
-					w.Header().Set("Content-Type", "image/jpeg")
-				case ".gif":
-					w.Header().Set("Content-Type", "image/gif")
-				}
-
-				// 设置缓存控制
-				w.Header().Set("Cache-Control", "public, max-age=31536000")
-
-				io.Copy(w, file)
-				return
+			// 处理静态文件请求
+			if strings.HasPrefix(path, "/webjars") || strings.HasPrefix(path, "/doc") {
+				server.handleStaticFile(w, r)
+			} else {
+				http.NotFound(w, r)
 			}
-			log.Printf("Not found: %s", r.URL.Path)
-			http.NotFound(w, r)
 		}
 	})
 }
 
-// 将OpenAPI转换为Swagger格式
-func convertToSwagger(openapi *OpenAPI) map[string]interface{} {
-	swagger := make(map[string]interface{})
-	swagger["openapi"] = openapi.OpenAPI
-	swagger["info"] = openapi.Info
-	swagger["tags"] = openapi.Tags
-	swagger["servers"] = []map[string]interface{}{
-		{
-			"url":         "http://localhost:8000",
-			"description": "Inferred Url",
-		},
+// NewKnife4jServer 创建新的Knife4j服务器实例
+func NewKnife4jServer(cfg *Config) (*Knife4jServer, error) {
+	// 获取front子目录的FS
+	subFS, err := fs.Sub(front, "front")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get front subdirectory: %v", err)
 	}
 
-	components := make(map[string]interface{})
-	var schemas map[string]interface{}
-	if s, ok := openapi.Components["schemas"].(map[string]interface{}); ok {
-		schemas = s
-		components["schemas"] = schemas
-	}
-	swagger["components"] = components
-
-	paths := make(map[string]interface{})
-	for path, item := range openapi.Paths {
-		if pathItem, ok := item.(map[string]interface{}); ok {
-			newPathItem := make(map[string]interface{})
-			for method, op := range pathItem {
-				if opMap, ok := op.(map[string]interface{}); ok {
-					// 处理 requestBody
-					if requestBody, ok := opMap["requestBody"].(map[string]interface{}); ok {
-						if content, ok := requestBody["content"].(map[string]interface{}); ok {
-							for _, cval := range content {
-								if cMap, ok := cval.(map[string]interface{}); ok {
-									if schema, ok := cMap["schema"].(map[string]interface{}); ok {
-										if ref, hasRef := schema["$ref"].(string); hasRef && schemas != nil {
-											refName := ref[strings.LastIndex(ref, "/")+1:]
-											if model, ok := schemas[refName].(map[string]interface{}); ok {
-												param := buildReqParameterTree(
-													strings.ToLower(refName), // 参数名称
-													refName,                  // 参数说明
-													refName,                  // type
-													refName,                  // schemaValue
-													true,                     // require
-													"body",                   // in
-													model, schemas,
-												)
-												opMap["reqParameters"] = []map[string]interface{}{param}
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-					newPathItem[method] = opMap
-				} else {
-					newPathItem[method] = op
-				}
-			}
-			paths[path] = newPathItem
-		} else {
-			paths[path] = item
+	if cfg.SwagResources == nil {
+		// 设置默认的 SwaggerResource
+		defaultResources := []*SwaggerResource{
+			{
+				URL:               "/v3/api-docs",
+				ConfigURL:         "/v3/api-docs/swagger-config",
+				OAuth2RedirectURL: "/swagger-ui/oauth2-redirect.html",
+				ValidatorURL:      "",
+				Name:              cfg.ServerName,
+				Location:          "/v3/api-docs",
+				SwaggerVersion:    "3.0.3",
+				TagSort:           "order",
+				OperationSort:     "order",
+			},
 		}
+		cfg.SwagResources = defaultResources
 	}
-	swagger["paths"] = paths
 
-	return swagger
+	server := &Knife4jServer{
+		config:   cfg,
+		staticFS: subFS,
+	}
+	return server, nil
 }
 
-func buildReqParameterTree(
-	name, description, schemaType, schemaValue string,
-	required bool, in string, model map[string]interface{}, schemas map[string]interface{},
-) map[string]interface{} {
-	param := map[string]interface{}{
-		"name":        name,
-		"description": description,
-		"type":        schemaType,
-		"schemaValue": schemaValue,
-		"in":          in,
-		"require":     required,
+// handleOpenAPIDocs 处理 OpenAPI 文档请求
+func (s *Knife4jServer) handleOpenAPIDocs(w http.ResponseWriter, r *http.Request) {
+	if s.config.OpenAPI == nil {
+		http.Error(w, "OpenAPI document not loaded", http.StatusInternalServerError)
+		return
 	}
-	// 递归 children
-	children := []map[string]interface{}{}
-	if props, ok := model["properties"].(map[string]interface{}); ok {
-		requiredFields := map[string]bool{}
-		if reqs, ok := model["required"].([]interface{}); ok {
-			for _, r := range reqs {
-				if s, ok := r.(string); ok {
-					requiredFields[s] = true
-				}
+
+	openAPI3 := convertToOpenAPI3(s.config.OpenAPI, s.config)
+	w.Header().Set("Content-Type", "application/json")
+	s.setCORSHeaders(w)
+
+	if err := json.NewEncoder(w).Encode(openAPI3); err != nil {
+		log.Printf("Failed to encode OpenAPI document: %v", err)
+		http.Error(w, "Failed to encode OpenAPI document", http.StatusInternalServerError)
+	}
+}
+
+// handleSwaggerConfig 处理 Swagger 配置请求
+func (s *Knife4jServer) handleSwaggerConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s.setCORSHeaders(w)
+
+	// 记录请求信息
+	log.Printf("处理 Swagger 配置请求")
+
+	// 确保返回正确的 JSON 格式
+	config := map[string]interface{}{
+		"urls": s.config.SwagResources,
+	}
+
+	if err := json.NewEncoder(w).Encode(config); err != nil {
+		log.Printf("Failed to encode swagger config: %v", err)
+		http.Error(w, "Failed to encode swagger config", http.StatusInternalServerError)
+	}
+}
+
+// handleStaticFile 处理静态文件请求
+func (s *Knife4jServer) handleStaticFile(w http.ResponseWriter, r *http.Request) {
+	// 获取请求路径
+	path := strings.TrimPrefix(r.URL.Path, "/")
+
+	// 处理根路径和默认文件
+	if path == "" || path == "doc.html" {
+		path = "doc.html"
+	}
+
+	log.Printf("尝试打开文件: %s", path)
+
+	// 尝试打开文件
+	file, err := s.staticFS.Open(path)
+	if err != nil {
+		log.Printf("Failed to open static file: %v, path: %s", err, path)
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+
+	// 设置内容类型
+	if path == "doc.html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	} else {
+		s.setContentType(w, filepath.Ext(path))
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000")
+
+	// 复制文件内容到响应
+	io.Copy(w, file)
+}
+
+// setCORSHeaders 设置CORS头
+func (s *Knife4jServer) setCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+// setContentType 设置内容类型
+func (s *Knife4jServer) setContentType(w http.ResponseWriter, ext string) {
+	switch ext {
+	case ".js":
+		w.Header().Set("Content-Type", "application/javascript")
+	case ".css":
+		w.Header().Set("Content-Type", "text/css")
+	case ".html":
+		w.Header().Set("Content-Type", "text/html")
+	case ".ico":
+		w.Header().Set("Content-Type", "image/x-icon")
+	case ".woff", ".woff2":
+		w.Header().Set("Content-Type", "font/woff2")
+	case ".ttf":
+		w.Header().Set("Content-Type", "font/ttf")
+	case ".eot":
+		w.Header().Set("Content-Type", "application/vnd.ms-fontobject")
+	case ".svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case ".png":
+		w.Header().Set("Content-Type", "image/png")
+	case ".jpg", ".jpeg":
+		w.Header().Set("Content-Type", "image/jpeg")
+	case ".gif":
+		w.Header().Set("Content-Type", "image/gif")
+	}
+}
+
+// convertToOpenAPI3 将 OpenAPI 对象转换为标准的 OpenAPI 3.0 JSON 结构
+func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// 基本信息
+	result["openapi"] = "3.0.1" // 使用固定版本
+	result["info"] = map[string]interface{}{
+		"title":       openapi.Info.Title,
+		"description": openapi.Info.Description,
+		"version":     openapi.Info.Version,
+		"name":        config.ServerName, // 服务名称
+	}
+
+	// 处理 servers
+	if len(openapi.Servers) > 0 {
+		servers := make([]map[string]interface{}, len(openapi.Servers))
+		for i, server := range openapi.Servers {
+			serverMap := map[string]interface{}{
+				"url":         server.URL,
+				"description": server.Description,
 			}
-		}
-		for propName, prop := range props {
-			if propMap, ok := prop.(map[string]interface{}); ok {
-				childType := ""
-				if t, ok := propMap["type"].(string); ok {
-					childType = t
-				}
-				childDesc := ""
-				if d, ok := propMap["description"].(string); ok {
-					childDesc = d
-				}
-				childSchemaValue := ""
-				if ref, ok := propMap["$ref"].(string); ok {
-					childSchemaValue = ref[strings.LastIndex(ref, "/")+1:]
-				}
-				childModel := map[string]interface{}{}
-				if childSchemaValue != "" && schemas != nil {
-					if m, ok := schemas[childSchemaValue].(map[string]interface{}); ok {
-						childModel = m
+			if len(server.Variables) > 0 {
+				variables := make(map[string]interface{})
+				for name, variable := range server.Variables {
+					variables[name] = map[string]interface{}{
+						"default":     variable.Default,
+						"description": variable.Description,
+						"enum":        variable.Enum,
 					}
 				}
-				child := buildReqParameterTree(
-					propName, childDesc, childType, childSchemaValue,
-					requiredFields[propName], "", childModel, schemas,
-				)
-				children = append(children, child)
+				serverMap["variables"] = variables
 			}
+			servers[i] = serverMap
+		}
+		result["servers"] = servers
+	} else {
+		// 如果没有配置服务器，添加默认服务器
+		result["servers"] = []map[string]interface{}{
+			{
+				"url":         "http://localhost:8000",
+				"description": "Generated server url",
+			},
 		}
 	}
-	param["children"] = children
-	return param
+
+	// 处理 paths
+	paths := make(map[string]interface{})
+	for path, pathItem := range openapi.Paths {
+		pathMap := make(map[string]interface{})
+
+		// 处理各种 HTTP 方法
+		if pathItem.Get != nil {
+			pathMap["get"] = convertOperationToOpenAPI3(pathItem.Get)
+		}
+		if pathItem.Post != nil {
+			pathMap["post"] = convertOperationToOpenAPI3(pathItem.Post)
+		}
+		if pathItem.Put != nil {
+			pathMap["put"] = convertOperationToOpenAPI3(pathItem.Put)
+		}
+		if pathItem.Delete != nil {
+			pathMap["delete"] = convertOperationToOpenAPI3(pathItem.Delete)
+		}
+		if pathItem.Patch != nil {
+			pathMap["patch"] = convertOperationToOpenAPI3(pathItem.Patch)
+		}
+
+		paths[path] = pathMap
+	}
+	result["paths"] = paths
+
+	// 处理 components
+	components := make(map[string]interface{})
+	components["schemas"] = convertSchemasToOpenAPI3(openapi.Components.Schemas)
+	result["components"] = components
+
+	return result
+}
+
+// convertOperationToOpenAPI3 将 Operation 转换为 OpenAPI 3.0 格式
+func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// 基本信息
+	result["tags"] = op.Tags
+	result["summary"] = op.Summary
+	result["description"] = op.Description
+	result["operationId"] = op.OperationID
+
+	// 处理请求体
+	if op.RequestBody != nil {
+		requestBody := make(map[string]interface{})
+		requestBody["required"] = op.RequestBody.Required
+		requestBody["content"] = convertContentToOpenAPI3(op.RequestBody.Content)
+		result["requestBody"] = requestBody
+	}
+
+	// 处理响应
+	responses := make(map[string]interface{})
+	for code, response := range op.Responses {
+		responseMap := make(map[string]interface{})
+		responseMap["description"] = response.Description
+		if response.Content != nil {
+			responseMap["content"] = convertContentToOpenAPI3(response.Content)
+		}
+		responses[code] = responseMap
+	}
+	result["responses"] = responses
+
+	return result
+}
+
+// convertContentToOpenAPI3 将 Content 转换为 OpenAPI 3.0 格式
+func convertContentToOpenAPI3(content map[string]MediaType) map[string]interface{} {
+	result := make(map[string]interface{})
+	for contentType, mediaType := range content {
+		mediaTypeMap := make(map[string]interface{})
+		if mediaType.Schema != nil {
+			mediaTypeMap["schema"] = convertSchemaToOpenAPI3(mediaType.Schema)
+		}
+		if mediaType.Example != nil {
+			mediaTypeMap["example"] = mediaType.Example
+		}
+		result[contentType] = mediaTypeMap
+	}
+	return result
+}
+
+// convertSchemasToOpenAPI3 将 Schemas 转换为 OpenAPI 3.0 格式
+func convertSchemasToOpenAPI3(schemas map[string]Schema) map[string]interface{} {
+	result := make(map[string]interface{})
+	for name, schema := range schemas {
+		result[name] = convertSchemaToOpenAPI3(&schema)
+	}
+	return result
+}
+
+// convertSchemaToOpenAPI3 将 Schema 转换为 OpenAPI 3.0 格式
+func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
+	if schema == nil {
+		return nil
+	}
+
+	result := make(map[string]interface{})
+
+	// 基本属性
+	if schema.Type != "" {
+		result["type"] = schema.Type
+	}
+	if schema.Format != "" {
+		result["format"] = schema.Format
+	}
+	if schema.Title != "" {
+		result["title"] = schema.Title
+	}
+	if schema.Description != "" {
+		result["description"] = schema.Description
+	}
+	if schema.Default != nil {
+		result["default"] = schema.Default
+	}
+
+	// 数值相关属性
+	if schema.MultipleOf != nil {
+		result["multipleOf"] = schema.MultipleOf
+	}
+	if schema.Maximum != nil {
+		result["maximum"] = schema.Maximum
+	}
+	if schema.Minimum != nil {
+		result["minimum"] = schema.Minimum
+	}
+	result["exclusiveMaximum"] = schema.ExclusiveMaximum
+	result["exclusiveMinimum"] = schema.ExclusiveMinimum
+
+	// 字符串相关属性
+	if schema.MaxLength != nil {
+		result["maxLength"] = schema.MaxLength
+	}
+	if schema.MinLength != nil {
+		result["minLength"] = schema.MinLength
+	}
+	if schema.Pattern != "" {
+		result["pattern"] = schema.Pattern
+	}
+
+	// 数组相关属性
+	if schema.MaxItems != nil {
+		result["maxItems"] = schema.MaxItems
+	}
+	if schema.MinItems != nil {
+		result["minItems"] = schema.MinItems
+	}
+	result["uniqueItems"] = schema.UniqueItems
+
+	// 对象相关属性
+	if schema.MaxProperties != nil {
+		result["maxProperties"] = schema.MaxProperties
+	}
+	if schema.MinProperties != nil {
+		result["minProperties"] = schema.MinProperties
+	}
+	if len(schema.Required) > 0 {
+		result["required"] = schema.Required
+	}
+
+	// 枚举值
+	if len(schema.Enum) > 0 {
+		result["enum"] = schema.Enum
+	}
+
+	// 属性定义
+	if schema.Properties != nil {
+		properties := make(map[string]interface{})
+		for name, prop := range schema.Properties {
+			properties[name] = convertSchemaToOpenAPI3(prop)
+		}
+		result["properties"] = properties
+	}
+
+	// 引用
+	if schema.Ref != "" {
+		result["$ref"] = schema.Ref
+	}
+
+	// 其他属性
+	result["nullable"] = schema.Nullable
+	result["readOnly"] = schema.ReadOnly
+	result["writeOnly"] = schema.WriteOnly
+	result["deprecated"] = schema.Deprecated
+
+	return result
 }

@@ -5,7 +5,6 @@ Knife4g is an API documentation generation tool for the Go programming language 
 ## Features
 
 - Supports OpenAPI 3.0 specification
-- Automatic conversion to Swagger 2.0 format
 - Built-in elegant UI interface
 - Supports static resource embedding
 - Simple and easy-to-use configuration options
@@ -25,23 +24,20 @@ import (
     "github.com/snac21/knife4g"
 )
 
-var (
-	OpenApiContent []byte
-)
-
 ...
-OpenApiContent, _ = os.ReadFile(yourOpenApiPath)
+// Openapi doc struct
+openAPI := &knife4g.OpenAPI3{}
+if content, err := os.ReadFile("./openapi.yaml"); err == nil {
+   if err := yaml.Unmarshal(content, openAPI); err != nil {
+      stdlog.Printf("Failed to parse OpenAPI document: %v", err)
+   }
+}
 
 // Configure Knife4g
 config := &knife4g.Config{
-    RelativePath:   "/doc",           // Access path prefix
-    OpenApiContent: openApiContent,   // OpenAPI document content
-    KService: knife4g.Knife4gService{
-        Name:           "API Documentation",
-        Url:            "/docYaml",
-        Location:       "/docYaml",
-        SwaggerVersion: "2.0",
-    },
+    RelativePath:   "",           // Access path prefix
+    ServerName:    "api-service", // your server name
+    OpenAPI:       openAPI,   // OpenAPI document content
 }
 
 // Create documentation handler
@@ -49,17 +45,18 @@ docHandler := knife4g.Handler(config)
 
 // Register with HTTP server
 srv := http.NewServer(opts...)
-srv.HandlePrefix("/doc", docHandler)
+srv.HandlePrefix("", docHandler)
+
 ```
 
 2. Access the documentation:
-    - Open your browser and visit http://your-server:port/doc/index to view the API documentation interface
+    - Open your browser and visit http://your-server:port/doc.html to view the API documentation interface
 
 ## Configuration
 
 - `RelativePath`: Documentation access path prefix
-- `OpenApiContent`: OpenAPI specification document content
-- `KService`: Service configuration information
+- `ServerName`: Your server name
+- `OpenAPI`: OpenAPI specification document content
 
 ## Notes
 
@@ -72,5 +69,5 @@ srv.HandlePrefix("/doc", docHandler)
 Apache License
 
 ## Acknowledgement
-Thanks to [knife4j](https://github.com/xiaoymin/swagger-bootstrap-ui)
-Thanks to [hononet639](https://github.com/hononet639/knife4g)
+- Thanks to [knife4j](https://github.com/xiaoymin/swagger-bootstrap-ui)
+- Thanks to [hononet639](https://github.com/hononet639/knife4g)
