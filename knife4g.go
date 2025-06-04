@@ -232,12 +232,23 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 
 	// 基本信息
 	result["openapi"] = "3.0.1" // 使用固定版本
-	result["info"] = map[string]interface{}{
-		"title":       openapi.Info.Title,
-		"description": openapi.Info.Description,
-		"version":     openapi.Info.Version,
-		"name":        config.ServerName, // 服务名称
+
+	// 构建 info 对象
+	info := map[string]interface{}{
+		"title":   openapi.Info.Title,
+		"version": openapi.Info.Version,
+		"name":    config.ServerName, // 服务名称
 	}
+
+	// 解析 info 的注释
+	infoParser := NewCommentParser().Parse(openapi.Info.Description)
+
+	// 从解析器中获取标签值
+	if infoParser.HasTag("description") {
+		info["description"] = infoParser.GetString("description")
+	}
+
+	result["info"] = info
 
 	// 处理 servers
 	if len(openapi.Servers) > 0 {
@@ -312,8 +323,14 @@ func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
 	// 基本信息
 	result["tags"] = op.Tags
 	result["summary"] = op.Summary
-	result["description"] = op.Description
 	result["operationId"] = op.OperationID
+
+	// 使用注释解析器处理description 信息
+	parser := NewCommentParser().Parse(op.Description)
+	// 从解析器中获取标签值
+	if parser.HasTag("description") {
+		result["description"] = parser.GetString("description")
+	}
 
 	// 处理请求体
 	if op.RequestBody != nil {

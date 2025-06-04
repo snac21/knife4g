@@ -282,3 +282,13 @@ type FieldDoc struct {
 	FieldEnum        []int  `json:"fieldEnum"`        // @enum 后的内容
 	Raw              string `json:"raw"`              // 原始描述
 }
+
+// OperationDescription 表示操作描述信息
+type OperationDescription struct {
+	Summary     string            `json:"summary,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
+	OperationID string            `json:"operationId,omitempty"`
+	Request     string            `json:"request,omitempty"`
+	Responses   map[string]string `json:"responses,omitempty"`
+}
