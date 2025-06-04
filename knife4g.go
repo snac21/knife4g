@@ -388,7 +388,7 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 
 	result := make(map[string]interface{})
 
-	// 基本属性
+	// 设置基本属性
 	if schema.Type != "" {
 		result["type"] = schema.Type
 	}
@@ -398,27 +398,45 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 	if schema.Title != "" {
 		result["title"] = schema.Title
 	}
-	if schema.Description != "" {
-		result["description"] = schema.Description
-	}
 	if schema.Default != nil {
 		result["default"] = schema.Default
 	}
 
-	// 数值相关属性
-	if schema.MultipleOf != nil {
-		result["multipleOf"] = schema.MultipleOf
+	// 使用注释解析器处理描述
+	parser := NewCommentParser().Parse(schema.Description)
+	// 从解析器中获取标签值
+	if parser.HasTag("description") {
+		result["description"] = parser.GetString("description")
 	}
-	if schema.Maximum != nil {
-		result["maximum"] = schema.Maximum
+	if parser.HasTag("example") {
+		result["example"] = parser.GetString("example")
 	}
-	if schema.Minimum != nil {
-		result["minimum"] = schema.Minimum
+	if parser.HasTag("format") {
+		result["format"] = parser.GetString("format")
 	}
-	result["exclusiveMaximum"] = schema.ExclusiveMaximum
-	result["exclusiveMinimum"] = schema.ExclusiveMinimum
+	if parser.HasTag("enum") {
+		result["enum"] = parser.GetArray("enum")
+	}
+	if parser.HasTag("required") {
+		result["required"] = parser.GetBool("required")
+	}
+	if parser.HasTag("minLength") {
+		result["minLength"] = int64(parser.GetNumber("minLength"))
+	}
+	if parser.HasTag("maxLength") {
+		result["maxLength"] = int64(parser.GetNumber("maxLength"))
+	}
+	if parser.HasTag("minimum") {
+		result["minimum"] = parser.GetNumber("minimum")
+	}
+	if parser.HasTag("maximum") {
+		result["maximum"] = parser.GetNumber("maximum")
+	}
+	if parser.HasTag("pattern") {
+		result["pattern"] = strings.Trim(parser.GetString("pattern"), "\"")
+	}
 
-	// 字符串相关属性
+	// 处理其他属性
 	if schema.MaxLength != nil {
 		result["maxLength"] = schema.MaxLength
 	}
@@ -428,8 +446,6 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 	if schema.Pattern != "" {
 		result["pattern"] = schema.Pattern
 	}
-
-	// 数组相关属性
 	if schema.MaxItems != nil {
 		result["maxItems"] = schema.MaxItems
 	}
@@ -437,8 +453,6 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 		result["minItems"] = schema.MinItems
 	}
 	result["uniqueItems"] = schema.UniqueItems
-
-	// 对象相关属性
 	if schema.MaxProperties != nil {
 		result["maxProperties"] = schema.MaxProperties
 	}
@@ -448,13 +462,11 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 	if len(schema.Required) > 0 {
 		result["required"] = schema.Required
 	}
-
-	// 枚举值
 	if len(schema.Enum) > 0 {
 		result["enum"] = schema.Enum
 	}
 
-	// 属性定义
+	// 处理属性定义
 	if schema.Properties != nil {
 		properties := make(map[string]interface{})
 		for name, prop := range schema.Properties {
@@ -463,12 +475,12 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 		result["properties"] = properties
 	}
 
-	// 引用
+	// 处理引用
 	if schema.Ref != "" {
 		result["$ref"] = schema.Ref
 	}
 
-	// 其他属性
+	// 设置其他属性
 	result["nullable"] = schema.Nullable
 	result["readOnly"] = schema.ReadOnly
 	result["writeOnly"] = schema.WriteOnly
