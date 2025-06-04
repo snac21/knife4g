@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -65,7 +66,7 @@ func Handler(config *Config) http.Handler {
 		server.setCORSHeaders(w)
 
 		// 记录请求信息
-		log.Printf("处理请求: %s", path)
+		slog.Debug("处理请求", "path", path)
 
 		switch path {
 		case "/v3/api-docs":
@@ -134,7 +135,7 @@ func (s *Knife4jServer) handleOpenAPIDocs(w http.ResponseWriter, r *http.Request
 	s.setCORSHeaders(w)
 
 	if err := json.NewEncoder(w).Encode(openAPI3); err != nil {
-		log.Printf("Failed to encode OpenAPI document: %v", err)
+		slog.Debug("Failed to encode OpenAPI document", "err", err)
 		http.Error(w, "Failed to encode OpenAPI document", http.StatusInternalServerError)
 	}
 }
@@ -145,7 +146,7 @@ func (s *Knife4jServer) handleSwaggerConfig(w http.ResponseWriter, r *http.Reque
 	s.setCORSHeaders(w)
 
 	// 记录请求信息
-	log.Printf("处理 Swagger 配置请求")
+	slog.Debug("处理 Swagger 配置请求")
 
 	// 确保返回正确的 JSON 格式
 	config := map[string]interface{}{
@@ -153,7 +154,7 @@ func (s *Knife4jServer) handleSwaggerConfig(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := json.NewEncoder(w).Encode(config); err != nil {
-		log.Printf("Failed to encode swagger config: %v", err)
+		slog.Debug("Failed to encode swagger config", "err", err)
 		http.Error(w, "Failed to encode swagger config", http.StatusInternalServerError)
 	}
 }
@@ -168,12 +169,12 @@ func (s *Knife4jServer) handleStaticFile(w http.ResponseWriter, r *http.Request)
 		path = "doc.html"
 	}
 
-	log.Printf("尝试打开文件: %s", path)
+	slog.Debug("尝试打开doc.html文件", "path", path)
 
 	// 尝试打开文件
 	file, err := s.staticFS.Open(path)
 	if err != nil {
-		log.Printf("Failed to open static file: %v, path: %s", err, path)
+		slog.Debug("Failed to open static file", "path", path, "err", err)
 		http.NotFound(w, r)
 		return
 	}
