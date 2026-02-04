@@ -1,5 +1,12 @@
 package knife4g
 
+import (
+	"bytes"
+	"encoding/json"
+
+	"gopkg.in/yaml.v3"
+)
+
 // OpenAPI3 表示 OpenAPI 3.0 规范的结构
 type OpenAPI3 struct {
 	OpenAPI    string              `json:"openapi" yaml:"openapi"`
@@ -144,7 +151,7 @@ type Schema struct {
 	Not                  *Schema                `json:"not,omitempty" yaml:"not,omitempty"`
 	Items                *Schema                `json:"items,omitempty" yaml:"items,omitempty"`
 	AdditionalItems      *Schema                `json:"additionalItems,omitempty" yaml:"additionalItems,omitempty"`
-	AdditionalProperties *Schema                `json:"additionalProperties,omitempty" yaml:"additionalProperties,omitempty"`
+	AdditionalProperties *SchemaOrBool          `json:"additionalProperties,omitempty" yaml:"additionalProperties,omitempty"`
 	Ref                  string                 `json:"$ref,omitempty" yaml:"$ref,omitempty"`
 	Nullable             bool                   `json:"nullable,omitempty" yaml:"nullable,omitempty"`
 	Discriminator        *Discriminator         `json:"discriminator,omitempty" yaml:"discriminator,omitempty"`
@@ -154,6 +161,53 @@ type Schema struct {
 	ExternalDocs         *ExternalDocumentation `json:"externalDocs,omitempty" yaml:"externalDocs,omitempty"`
 	Example              interface{}            `json:"example,omitempty" yaml:"example,omitempty"`
 	Deprecated           bool                   `json:"deprecated,omitempty" yaml:"deprecated,omitempty"`
+}
+
+// SchemaOrBool handles additionalProperties being either a boolean or a schema.
+type SchemaOrBool struct {
+	Allows bool
+	Schema *Schema
+	IsBool bool
+}
+
+func (s *SchemaOrBool) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		var b bool
+		if err := value.Decode(&b); err == nil {
+			s.Allows = b
+			s.Schema = nil
+			s.IsBool = true
+			return nil
+		}
+	}
+	var schema Schema
+	if err := value.Decode(&schema); err != nil {
+		return err
+	}
+	s.Schema = &schema
+	s.IsBool = false
+	return nil
+}
+
+func (s *SchemaOrBool) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(trimmed, &b); err == nil {
+		s.Allows = b
+		s.Schema = nil
+		s.IsBool = true
+		return nil
+	}
+	var schema Schema
+	if err := json.Unmarshal(trimmed, &schema); err != nil {
+		return err
+	}
+	s.Schema = &schema
+	s.IsBool = false
+	return nil
 }
 
 // MediaType 表示媒体类型

@@ -332,6 +332,15 @@ func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
 	if parser.HasTag("description") {
 		result["description"] = parser.GetString("description")
 	}
+	if (result["summary"] == nil || result["summary"] == "") && parser.HasTag("summary") {
+		result["summary"] = parser.GetString("summary")
+	}
+	if (result["operationId"] == nil || result["operationId"] == "") && parser.HasTag("operationId") {
+		result["operationId"] = parser.GetString("operationId")
+	}
+	if len(op.Tags) == 0 && parser.HasTag("tags") {
+		result["tags"] = parser.GetArray("tags")
+	}
 
 	// 处理请求体
 	if op.RequestBody != nil {
@@ -418,9 +427,6 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 	if parser.HasTag("enum") {
 		result["enum"] = parser.GetArray("enum")
 	}
-	if parser.HasTag("required") {
-		result["required"] = parser.GetBool("required")
-	}
 	if parser.HasTag("minLength") {
 		result["minLength"] = int64(parser.GetNumber("minLength"))
 	}
@@ -466,6 +472,36 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 	if len(schema.Enum) > 0 {
 		result["enum"] = schema.Enum
 	}
+	if schema.Items != nil {
+		result["items"] = convertSchemaToOpenAPI3(schema.Items)
+	}
+	if schema.AdditionalItems != nil {
+		result["additionalItems"] = convertSchemaToOpenAPI3(schema.AdditionalItems)
+	}
+	if len(schema.AllOf) > 0 {
+		allOf := make([]map[string]interface{}, 0, len(schema.AllOf))
+		for _, item := range schema.AllOf {
+			allOf = append(allOf, convertSchemaToOpenAPI3(item))
+		}
+		result["allOf"] = allOf
+	}
+	if len(schema.OneOf) > 0 {
+		oneOf := make([]map[string]interface{}, 0, len(schema.OneOf))
+		for _, item := range schema.OneOf {
+			oneOf = append(oneOf, convertSchemaToOpenAPI3(item))
+		}
+		result["oneOf"] = oneOf
+	}
+	if len(schema.AnyOf) > 0 {
+		anyOf := make([]map[string]interface{}, 0, len(schema.AnyOf))
+		for _, item := range schema.AnyOf {
+			anyOf = append(anyOf, convertSchemaToOpenAPI3(item))
+		}
+		result["anyOf"] = anyOf
+	}
+	if schema.Not != nil {
+		result["not"] = convertSchemaToOpenAPI3(schema.Not)
+	}
 
 	// 处理属性定义
 	if schema.Properties != nil {
@@ -474,6 +510,13 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 			properties[name] = convertSchemaToOpenAPI3(prop)
 		}
 		result["properties"] = properties
+	}
+	if schema.AdditionalProperties != nil {
+		if schema.AdditionalProperties.IsBool {
+			result["additionalProperties"] = schema.AdditionalProperties.Allows
+		} else if schema.AdditionalProperties.Schema != nil {
+			result["additionalProperties"] = convertSchemaToOpenAPI3(schema.AdditionalProperties.Schema)
+		}
 	}
 
 	// 处理引用
