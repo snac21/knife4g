@@ -232,7 +232,11 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 	result := make(map[string]interface{})
 
 	// 基本信息
-	result["openapi"] = "3.0.1" // 使用固定版本
+	if openapi.OpenAPI != "" {
+		result["openapi"] = openapi.OpenAPI
+	} else {
+		result["openapi"] = "3.0.1"
+	}
 
 	// 构建 info 对象
 	info := map[string]interface{}{
@@ -273,14 +277,27 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 			servers[i] = serverMap
 		}
 		result["servers"] = servers
-	} else {
-		// 如果没有配置服务器，添加默认服务器
-		result["servers"] = []map[string]interface{}{
-			{
-				"url":         "http://localhost:8000",
-				"description": "Generated server url",
-			},
+	}
+
+	// 处理 tags
+	if len(openapi.Tags) > 0 {
+		tags := make([]map[string]interface{}, 0, len(openapi.Tags))
+		for _, tag := range openapi.Tags {
+			tagMap := map[string]interface{}{
+				"name": tag.Name,
+			}
+			if tag.Description != "" {
+				tagMap["description"] = tag.Description
+			}
+			if tag.ExternalDocs != nil {
+				tagMap["externalDocs"] = map[string]interface{}{
+					"description": tag.ExternalDocs.Description,
+					"url":         tag.ExternalDocs.URL,
+				}
+			}
+			tags = append(tags, tagMap)
 		}
+		result["tags"] = tags
 	}
 
 	// 处理 paths
