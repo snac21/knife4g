@@ -149,7 +149,7 @@ func (s *Knife4jServer) handleSwaggerConfig(w http.ResponseWriter, r *http.Reque
 	slog.Debug("处理 Swagger 配置请求")
 
 	// 确保返回正确的 JSON 格式
-	config := map[string]interface{}{
+	config := map[string]any{
 		"urls": s.config.SwagResources,
 	}
 
@@ -228,8 +228,8 @@ func (s *Knife4jServer) setContentType(w http.ResponseWriter, ext string) {
 }
 
 // convertToOpenAPI3 将 OpenAPI 对象转换为标准的 OpenAPI 3.0 JSON 结构
-func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{} {
-	result := make(map[string]interface{})
+func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]any {
+	result := make(map[string]any)
 
 	// 基本信息
 	if openapi.OpenAPI != "" {
@@ -239,7 +239,7 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 	}
 
 	// 构建 info 对象
-	info := map[string]interface{}{
+	info := map[string]any{
 		"title":   openapi.Info.Title,
 		"version": openapi.Info.Version,
 		"name":    config.ServerName, // 服务名称
@@ -257,16 +257,16 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 
 	// 处理 servers
 	if len(openapi.Servers) > 0 {
-		servers := make([]map[string]interface{}, len(openapi.Servers))
+		servers := make([]map[string]any, len(openapi.Servers))
 		for i, server := range openapi.Servers {
-			serverMap := map[string]interface{}{
+			serverMap := map[string]any{
 				"url":         server.URL,
 				"description": server.Description,
 			}
 			if len(server.Variables) > 0 {
-				variables := make(map[string]interface{})
+				variables := make(map[string]any)
 				for name, variable := range server.Variables {
-					variables[name] = map[string]interface{}{
+					variables[name] = map[string]any{
 						"default":     variable.Default,
 						"description": variable.Description,
 						"enum":        variable.Enum,
@@ -279,18 +279,37 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 		result["servers"] = servers
 	}
 
-	// 处理 tags
+	// 处理全局 tags 列表
 	if len(openapi.Tags) > 0 {
-		tags := make([]map[string]interface{}, 0, len(openapi.Tags))
+		tags := make([]map[string]any, 0, len(openapi.Tags))
 		for _, tag := range openapi.Tags {
-			tagMap := map[string]interface{}{
-				"name": tag.Name,
-			}
+			tagName := tag.Name
+			tagDesc := tag.Description
+
+			// 解析 Service 节点注释文本
+			//（位于 tag.Description 中）
+			// 提取自定义的 @tags: 标签名与 @description: 描述信息
 			if tag.Description != "" {
-				tagMap["description"] = tag.Description
+				parser := NewCommentParser().Parse(tag.Description)
+				if parser.HasTag("tags") {
+					if customTag := parser.GetString("tags"); customTag != "" {
+						// 使用 Proto 中定义的 Service 级 @tags 替换默认的服务 Tag 名称
+						tagName = customTag
+					}
+				}
+				if parser.HasTag("description") {
+					tagDesc = parser.GetString("description") // 提取过滤掉扩展标记后的纯文本描述
+				}
+			}
+
+			tagMap := map[string]any{
+				"name": tagName,
+			}
+			if tagDesc != "" {
+				tagMap["description"] = tagDesc
 			}
 			if tag.ExternalDocs != nil {
-				tagMap["externalDocs"] = map[string]interface{}{
+				tagMap["externalDocs"] = map[string]any{
 					"description": tag.ExternalDocs.Description,
 					"url":         tag.ExternalDocs.URL,
 				}
@@ -301,9 +320,9 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 	}
 
 	// 处理 paths
-	paths := make(map[string]interface{})
+	paths := make(map[string]any)
 	for path, pathItem := range openapi.Paths {
-		pathMap := make(map[string]interface{})
+		pathMap := make(map[string]any)
 
 		// 处理各种 HTTP 方法
 		if pathItem.Get != nil {
@@ -327,25 +346,25 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]interface{}
 	result["paths"] = paths
 
 	// 处理 components
-	components := make(map[string]interface{})
+	components := make(map[string]any)
 	components["schemas"] = convertSchemasToOpenAPI3(openapi.Components.Schemas)
 	result["components"] = components
 
 	return result
 }
 
-// convertOperationToOpenAPI3 将 Operation 转换为 OpenAPI 3.0 格式
-func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
-	result := make(map[string]interface{})
+// convertOperationToOpenAPI3 将 Operation 转换为 OpenAPI 3.0 格式并解析注释扩展指令
+func convertOperationToOpenAPI3(op *Operation) map[string]any {
+	result := make(map[string]any)
 
 	// 基本信息
 	result["tags"] = op.Tags
 	result["summary"] = op.Summary
 	result["operationId"] = op.OperationID
 
-	// 使用注释解析器处理description 信息
+	// 使用注释解析器处理 RPC 操作的 description 文本
 	parser := NewCommentParser().Parse(op.Description)
-	// 从解析器中获取标签值
+	// 从解析器中获取并更新各种标注扩展值
 	if parser.HasTag("description") {
 		result["description"] = parser.GetString("description")
 	}
@@ -355,22 +374,23 @@ func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
 	if (result["operationId"] == nil || result["operationId"] == "") && parser.HasTag("operationId") {
 		result["operationId"] = parser.GetString("operationId")
 	}
-	if len(op.Tags) == 0 && parser.HasTag("tags") {
+	// 若 RPC 注释中显式定义了 @tags，优先使用解析出的标签切片无条件覆盖默认 tags
+	if parser.HasTag("tags") && len(parser.GetArray("tags")) > 0 {
 		result["tags"] = parser.GetArray("tags")
 	}
 
 	// 处理请求体
 	if op.RequestBody != nil {
-		requestBody := make(map[string]interface{})
+		requestBody := make(map[string]any)
 		requestBody["required"] = op.RequestBody.Required
 		requestBody["content"] = convertContentToOpenAPI3(op.RequestBody.Content)
 		result["requestBody"] = requestBody
 	}
 
 	// 处理响应
-	responses := make(map[string]interface{})
+	responses := make(map[string]any)
 	for code, response := range op.Responses {
-		responseMap := make(map[string]interface{})
+		responseMap := make(map[string]any)
 		responseMap["description"] = response.Description
 		if response.Content != nil {
 			responseMap["content"] = convertContentToOpenAPI3(response.Content)
@@ -383,10 +403,10 @@ func convertOperationToOpenAPI3(op *Operation) map[string]interface{} {
 }
 
 // convertContentToOpenAPI3 将 Content 转换为 OpenAPI 3.0 格式
-func convertContentToOpenAPI3(content map[string]MediaType) map[string]interface{} {
-	result := make(map[string]interface{})
+func convertContentToOpenAPI3(content map[string]MediaType) map[string]any {
+	result := make(map[string]any)
 	for contentType, mediaType := range content {
-		mediaTypeMap := make(map[string]interface{})
+		mediaTypeMap := make(map[string]any)
 		if mediaType.Schema != nil {
 			mediaTypeMap["schema"] = convertSchemaToOpenAPI3(mediaType.Schema)
 		}
@@ -399,8 +419,8 @@ func convertContentToOpenAPI3(content map[string]MediaType) map[string]interface
 }
 
 // convertSchemasToOpenAPI3 将 Schemas 转换为 OpenAPI 3.0 格式
-func convertSchemasToOpenAPI3(schemas map[string]Schema) map[string]interface{} {
-	result := make(map[string]interface{})
+func convertSchemasToOpenAPI3(schemas map[string]Schema) map[string]any {
+	result := make(map[string]any)
 	for name, schema := range schemas {
 		result[name] = convertSchemaToOpenAPI3(&schema)
 	}
@@ -408,12 +428,12 @@ func convertSchemasToOpenAPI3(schemas map[string]Schema) map[string]interface{} 
 }
 
 // convertSchemaToOpenAPI3 将 Schema 转换为 OpenAPI 3.0 格式
-func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
+func convertSchemaToOpenAPI3(schema *Schema) map[string]any {
 	if schema == nil {
 		return nil
 	}
 
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 
 	// 设置基本属性
 	if schema.Type != "" {
@@ -496,21 +516,21 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 		result["additionalItems"] = convertSchemaToOpenAPI3(schema.AdditionalItems)
 	}
 	if len(schema.AllOf) > 0 {
-		allOf := make([]map[string]interface{}, 0, len(schema.AllOf))
+		allOf := make([]map[string]any, 0, len(schema.AllOf))
 		for _, item := range schema.AllOf {
 			allOf = append(allOf, convertSchemaToOpenAPI3(item))
 		}
 		result["allOf"] = allOf
 	}
 	if len(schema.OneOf) > 0 {
-		oneOf := make([]map[string]interface{}, 0, len(schema.OneOf))
+		oneOf := make([]map[string]any, 0, len(schema.OneOf))
 		for _, item := range schema.OneOf {
 			oneOf = append(oneOf, convertSchemaToOpenAPI3(item))
 		}
 		result["oneOf"] = oneOf
 	}
 	if len(schema.AnyOf) > 0 {
-		anyOf := make([]map[string]interface{}, 0, len(schema.AnyOf))
+		anyOf := make([]map[string]any, 0, len(schema.AnyOf))
 		for _, item := range schema.AnyOf {
 			anyOf = append(anyOf, convertSchemaToOpenAPI3(item))
 		}
@@ -522,7 +542,7 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]interface{} {
 
 	// 处理属性定义
 	if schema.Properties != nil {
-		properties := make(map[string]interface{})
+		properties := make(map[string]any)
 		for name, prop := range schema.Properties {
 			properties[name] = convertSchemaToOpenAPI3(prop)
 		}
