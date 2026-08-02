@@ -13,6 +13,26 @@ import (
 	"strings"
 )
 
+const (
+	// MIME 媒体类型常量
+	MIMEApplicationJSON   = "application/json"
+	MIMEMultipartFormData = "multipart/form-data"
+
+	// OpenAPI Parameter 位置与数据类型常量
+	ParamInFormData   = "formData"
+	ParamTypeFile     = "file"
+	ParamTypeString   = "string"
+	ParamFormatBinary = "binary"
+
+	// Knife4g 注释扩展 Key 常量
+	TagConsumes    = "consumes"
+	TagFile        = "file"
+	TagDescription = "description"
+	TagSummary     = "summary"
+	TagOperationID = "operationId"
+	TagTags        = "tags"
+)
+
 var (
 	//go:embed front
 	front embed.FS
@@ -326,19 +346,19 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]any {
 
 		// 处理各种 HTTP 方法
 		if pathItem.Get != nil {
-			pathMap["get"] = convertOperationToOpenAPI3(pathItem.Get)
+			pathMap["get"] = convertOperationToOpenAPI3(pathItem.Get, openapi.Components.Schemas)
 		}
 		if pathItem.Post != nil {
-			pathMap["post"] = convertOperationToOpenAPI3(pathItem.Post)
+			pathMap["post"] = convertOperationToOpenAPI3(pathItem.Post, openapi.Components.Schemas)
 		}
 		if pathItem.Put != nil {
-			pathMap["put"] = convertOperationToOpenAPI3(pathItem.Put)
+			pathMap["put"] = convertOperationToOpenAPI3(pathItem.Put, openapi.Components.Schemas)
 		}
 		if pathItem.Delete != nil {
-			pathMap["delete"] = convertOperationToOpenAPI3(pathItem.Delete)
+			pathMap["delete"] = convertOperationToOpenAPI3(pathItem.Delete, openapi.Components.Schemas)
 		}
 		if pathItem.Patch != nil {
-			pathMap["patch"] = convertOperationToOpenAPI3(pathItem.Patch)
+			pathMap["patch"] = convertOperationToOpenAPI3(pathItem.Patch, openapi.Components.Schemas)
 		}
 
 		paths[path] = pathMap
@@ -353,8 +373,28 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]any {
 	return result
 }
 
+// getTargetSchema 极简解开 Operation 请求体中 $ref 所引用的 Component Schema 节点
+func getTargetSchema(op *Operation, componentsSchemas map[string]Schema) *Schema {
+	if op.RequestBody == nil || op.RequestBody.Content == nil {
+		return nil
+	}
+	for _, media := range op.RequestBody.Content {
+		if media.Schema != nil {
+			if media.Schema.Ref != "" {
+				schemaName := filepath.Base(media.Schema.Ref)
+				if compSchema, exists := componentsSchemas[schemaName]; exists {
+					return &compSchema
+				}
+			} else {
+				return media.Schema
+			}
+		}
+	}
+	return nil
+}
+
 // convertOperationToOpenAPI3 将 Operation 转换为 OpenAPI 3.0 格式并解析注释扩展指令
-func convertOperationToOpenAPI3(op *Operation) map[string]any {
+func convertOperationToOpenAPI3(op *Operation, componentsSchemas map[string]Schema) map[string]any {
 	result := make(map[string]any)
 
 	// 基本信息
@@ -364,27 +404,98 @@ func convertOperationToOpenAPI3(op *Operation) map[string]any {
 
 	// 使用注释解析器处理 RPC 操作的 description 文本
 	parser := NewCommentParser().Parse(op.Description)
-	// 从解析器中获取并更新各种标注扩展值
-	if parser.HasTag("description") {
-		result["description"] = parser.GetString("description")
+	if parser.HasTag(TagDescription) {
+		result["description"] = parser.GetString(TagDescription)
 	}
-	if (result["summary"] == nil || result["summary"] == "") && parser.HasTag("summary") {
-		result["summary"] = parser.GetString("summary")
+	if (result["summary"] == nil || result["summary"] == "") && parser.HasTag(TagSummary) {
+		result["summary"] = parser.GetString(TagSummary)
 	}
-	if (result["operationId"] == nil || result["operationId"] == "") && parser.HasTag("operationId") {
-		result["operationId"] = parser.GetString("operationId")
+	if (result["operationId"] == nil || result["operationId"] == "") && parser.HasTag(TagOperationID) {
+		result["operationId"] = parser.GetString(TagOperationID)
 	}
-	// 若 RPC 注释中显式定义了 @tags，优先使用解析出的标签切片无条件覆盖默认 tags
-	if parser.HasTag("tags") && len(parser.GetArray("tags")) > 0 {
-		result["tags"] = parser.GetArray("tags")
+	if parser.HasTag(TagTags) && len(parser.GetArray(TagTags)) > 0 {
+		result["tags"] = parser.GetArray(TagTags)
+	}
+
+	// 解开 $ref 追溯查找当前 Operation 请求体所引用的 Component Schema 节点
+	targetSchema := getTargetSchema(op, componentsSchemas)
+
+	// 根据 RPC 方法注释上的 @consumes 精准认定文件上传接口
+	consumesVal := parser.GetString(TagConsumes)
+	isFileOperation := consumesVal == MIMEMultipartFormData || parser.HasTag(TagFile)
+
+	if isFileOperation {
+		result["consumes"] = []string{MIMEMultipartFormData}
+		result["produces"] = []string{MIMEApplicationJSON}
+	} else if consumesVal != "" {
+		result["consumes"] = []string{consumesVal}
 	}
 
 	// 处理请求体
 	if op.RequestBody != nil {
 		requestBody := make(map[string]any)
 		requestBody["required"] = op.RequestBody.Required
-		requestBody["content"] = convertContentToOpenAPI3(op.RequestBody.Content)
-		result["requestBody"] = requestBody
+		contentMap := convertContentToOpenAPI3(op.RequestBody.Content)
+		requestBody["content"] = contentMap
+		// 对于文件上传接口，不向前端暴露 requestBody 节点，消除 Knife4j Vue 前端产生 in: "body" 并强制切换为 raw 的死锁
+		if !isFileOperation {
+			result["requestBody"] = requestBody
+		}
+	}
+
+	// 针对 Knife4j 前端 UI 调试面板展平注入 formData 属性，确保前端能 100% 渲染出文件上传选择控件与输入框
+	if isFileOperation && targetSchema != nil && len(targetSchema.Properties) > 0 {
+		reqSet := make(map[string]bool)
+		for _, reqField := range targetSchema.Required {
+			reqSet[reqField] = true
+		}
+
+		formDataParams := make([]map[string]any, 0, len(targetSchema.Properties))
+		for propName, propSchema := range targetSchema.Properties {
+			pType := propSchema.Type
+			if pType == "" {
+				pType = ParamTypeString
+			}
+			pDesc := propSchema.Description
+			pParser := NewCommentParser().Parse(pDesc)
+			if pParser.HasTag(TagDescription) {
+				pDesc = pParser.GetString(TagDescription)
+			}
+			pItem := map[string]any{
+				"name":        propName,
+				"in":          ParamInFormData,
+				"type":        pType,
+				"description": pDesc,
+			}
+
+			isFileField := pParser.HasTag(TagFile)
+
+			if reqSet[propName] || isFileField {
+				pItem["required"] = true
+			}
+			if isFileField {
+				pItem["type"] = ParamTypeFile
+			}
+			formDataParams = append(formDataParams, pItem)
+		}
+		if len(formDataParams) > 0 {
+			result["parameters"] = formDataParams
+		}
+	} else if len(op.Parameters) > 0 {
+		params := make([]map[string]any, len(op.Parameters))
+		for i, param := range op.Parameters {
+			paramMap := map[string]any{
+				"name":        param.Name,
+				"in":          param.In,
+				"description": param.Description,
+				"required":    param.Required,
+			}
+			if param.Schema != nil {
+				paramMap["schema"] = convertSchemaToOpenAPI3(param.Schema)
+			}
+			params[i] = paramMap
+		}
+		result["parameters"] = params
 	}
 
 	// 处理响应
@@ -451,6 +562,12 @@ func convertSchemaToOpenAPI3(schema *Schema) map[string]any {
 
 	// 使用注释解析器处理描述
 	parser := NewCommentParser().Parse(schema.Description)
+
+	// OpenAPI 3.0 规范：若属性带有 @file 标注，强制转换为 type: "string", format: "binary"
+	if parser.HasTag(TagFile) {
+		result["type"] = ParamTypeString
+		result["format"] = ParamFormatBinary
+	}
 	// 从解析器中获取标签值
 	if parser.HasTag("description") {
 		result["description"] = parser.GetString("description")

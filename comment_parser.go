@@ -49,8 +49,12 @@ func (p *CommentParser) Parse(comment string) *CommentParser {
 			tag := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
 
-			// 根据不同的标签名称进行分类提炼与格式化存储
+			// 根据不同的标签名称进行分类
 			switch tag {
+			case "consumes":
+				p.boolTags[tag] = true
+				p.tags[tag] = value
+
 			case "tags":
 				// 处理标签列表，支持单个标签以及按逗号分隔的多标签切片
 				value = strings.TrimSpace(value)
