@@ -1,6 +1,6 @@
 module github.com/snac21/knife4g
 
-go 1.18
+go 1.25.11
 
 require gopkg.in/yaml.v3 v3.0.1
 
