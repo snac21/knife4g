@@ -320,6 +320,14 @@ func convertToOpenAPI3(openapi *OpenAPI3, config *Config) map[string]any {
 				if parser.HasTag("description") {
 					tagDesc = parser.GetString("description") // 提取过滤掉扩展标记后的纯文本描述
 				}
+			} else {
+				// 若单proto服务编译时 tags description 为空，
+				// 解析 info 里的 tags 定义
+				if infoParser.HasTag("tags") {
+					if customTag := infoParser.GetString("tags"); customTag != "" {
+						tagName = customTag
+					}
+				}
 			}
 
 			tagMap := map[string]any{
