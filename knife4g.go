@@ -492,11 +492,31 @@ func convertOperationToOpenAPI3(op *Operation, componentsSchemas map[string]Sche
 	} else if len(op.Parameters) > 0 {
 		params := make([]map[string]any, len(op.Parameters))
 		for i, param := range op.Parameters {
+			pDesc := param.Description
+			pRequired := param.Required
+			pExample := param.Example
+
+			if pDesc != "" {
+				pParser := NewCommentParser().Parse(pDesc)
+				if parsedDesc := pParser.GetString(TagDescription); parsedDesc != "" {
+					pDesc = parsedDesc
+				}
+				if pParser.HasTag("required") {
+					pRequired = pParser.GetBool("required")
+				}
+				if pParser.HasTag("example") {
+					pExample = pParser.GetString("example")
+				}
+			}
+
 			paramMap := map[string]any{
 				"name":        param.Name,
 				"in":          param.In,
-				"description": param.Description,
-				"required":    param.Required,
+				"description": pDesc,
+				"required":    pRequired,
+			}
+			if pExample != nil && pExample != "" {
+				paramMap["example"] = pExample
 			}
 			if param.Schema != nil {
 				paramMap["schema"] = convertSchemaToOpenAPI3(param.Schema)
